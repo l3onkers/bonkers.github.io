@@ -1,0 +1,241 @@
+name: 🧪 Tests y Validación
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+# Allow multiple concurrent test runs
+concurrency:
+  group: "tests-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  # Test 1: Jekyll Build y Validación
+  jekyll-build:
+    name: 🔨 Jekyll Build Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.1'
+          bundler-cache: true
+
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Build with Jekyll (Development)
+        run: |
+          bundle exec jekyll build --baseurl "${{ steps.pages.outputs.base_path }}" --verbose
+        env:
+          JEKYLL_ENV: development
+
+      - name: Build with Jekyll (Production)
+        run: |
+          bundle exec jekyll build --baseurl "${{ steps.pages.outputs.base_path }}" --verbose
+        env:
+          JEKYLL_ENV: production
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jekyll-site
+          path: _site/
+          retention-days: 1
+
+  # Test 2: Validación HTML y Accesibilidad
+  html-validation:
+    name: 🔍 HTML & Accessibility Tests
+    runs-on: ubuntu-latest
+    needs: jekyll-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: jekyll-site
+          path: _site/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install testing dependencies
+        run: |
+          npm install -g html-validate
+          npm install -g pa11y
+          npm install -g lighthouse
+
+      - name: Validate HTML
+        run: |
+          echo "🔍 Validando HTML..."
+          find _site -name "*.html" -exec html-validate {} \;
+
+      - name: Test Accessibility
+        run: |
+          echo "♿ Testeando accesibilidad..."
+          # Servir el sitio localmente para testing
+          python3 -m http.server 8000 --directory _site &
+          SERVER_PID=$!
+          sleep 5
+          
+          # Test de accesibilidad en páginas principales
+          pa11y http://localhost:8000/ || true
+          pa11y http://localhost:8000/blog.html || true
+          pa11y http://localhost:8000/cv.html || true
+          pa11y http://localhost:8000/en/ || true
+          
+          # Matar el servidor
+          kill $SERVER_PID
+
+  # Test 3: Validación de Contenido y Estructura
+  content-validation:
+    name: 📝 Content & Structure Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.1'
+          bundler-cache: true
+
+      - name: Install test gems
+        run: |
+          gem install yaml-lint
+          gem install htmlbeautifier
+
+      - name: Validate YAML files
+        run: |
+          echo "📋 Validando archivos YAML..."
+          yaml-lint _config.yml
+          yaml-lint _i18n/es.yml
+          yaml-lint _i18n/en.yml
+          
+          # Validar frontmatter de posts
+          for file in _posts/**/*.md; do
+            if [ -f "$file" ]; then
+              echo "Validando frontmatter: $file"
+              head -20 "$file" | yaml-lint || echo "⚠️ Warning in $file"
+            fi
+          done
+
+      - name: Check posts translations
+        run: |
+          echo "🌐 Verificando traducciones de posts..."
+          
+          # Verificar que cada post en español tenga su traducción en inglés
+          for post in _posts/es/*.md; do
+            if [ -f "$post" ]; then
+              filename=$(basename "$post")
+              if [ ! -f "_posts/en/$filename" ]; then
+                echo "❌ Falta traducción: _posts/en/$filename"
+                exit 1
+              else
+                echo "✅ Traducción encontrada: $filename"
+              fi
+            fi
+          done
+
+      - name: Check required files
+        run: |
+          echo "📁 Verificando archivos requeridos..."
+          required_files=(
+            "_config.yml"
+            "index.html"
+            "en/index.html"
+            "_layouts/default.html"
+            "_layouts/post.html"
+            "assets/css/style.css"
+            "assets/js/main.js"
+            "robots.txt"
+            ".htaccess"
+          )
+          
+          for file in "${required_files[@]}"; do
+            if [ -f "$file" ]; then
+              echo "✅ $file"
+            else
+              echo "❌ Falta: $file"
+              exit 1
+            fi
+          done
+
+  # Test 4: Performance y Lighthouse
+  performance-test:
+    name: 🚀 Performance Tests
+    runs-on: ubuntu-latest
+    needs: jekyll-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: jekyll-site
+          path: _site/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Lighthouse
+        run: npm install -g lighthouse
+
+      - name: Run Lighthouse tests
+        run: |
+          echo "🚀 Ejecutando tests de performance..."
+          # Servir el sitio localmente
+          python3 -m http.server 8000 --directory _site &
+          SERVER_PID=$!
+          sleep 5
+          
+          # Ejecutar Lighthouse
+          lighthouse http://localhost:8000/ \
+            --output html \
+            --output-path ./lighthouse-report.html \
+            --chrome-flags="--headless --no-sandbox" \
+            --quiet || true
+          
+          # Matar el servidor
+          kill $SERVER_PID
+
+      - name: Upload Lighthouse report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report
+          path: lighthouse-report.html
+          retention-days: 7
+
+  # Test Summary
+  test-summary:
+    name: 📊 Test Summary
+    runs-on: ubuntu-latest
+    needs: [jekyll-build, html-validation, content-validation, performance-test]
+    if: always()
+    steps:
+      - name: Test Results Summary
+        run: |
+          echo "## 🧪 Resumen de Tests" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Estado |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Jekyll Build | ${{ needs.jekyll-build.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| HTML Validation | ${{ needs.html-validation.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Content Validation | ${{ needs.content-validation.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Performance Test | ${{ needs.performance-test.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
